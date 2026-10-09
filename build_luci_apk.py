@@ -15,7 +15,6 @@ The LuCI app is architecture-independent (pure Lua + HTML + JS).
 
 import hashlib
 import os
-import shutil
 import struct
 import time
 import zlib
@@ -732,7 +731,7 @@ class APKv3Builder:
 
 PKG_NAME = "luci-app-mitmproxy"
 PKG_VERSION = "1.0.0"
-PKG_RELEASE = "1"
+PKG_RELEASE = "3"
 
 
 def build_luci_apk(source_dir: Path = None, output_dir: Path = None):
@@ -758,7 +757,7 @@ def build_luci_apk(source_dir: Path = None, output_dir: Path = None):
         description="LuCI web interface for mitmproxy HTTP proxy",
         license="MIT",
         origin=PKG_NAME,
-        maintainer="Open Firewall Project",
+        maintainer="Spark Secure <alan@spark-secure.com>",
         url="https://mitmproxy.org/",
     )
 
@@ -766,6 +765,9 @@ def build_luci_apk(source_dir: Path = None, output_dir: Path = None):
     # Do NOT list "mitmproxy" here: it's our own local APK, not in any repo,
     # so apk would refuse to install this package if it can't resolve it.
     builder.add_depend("luci-base")
+    # The pages use the Lua controller/CBI framework, which OpenWrt 25.x
+    # only provides through luci-compat (pulls in luci-lua-runtime).
+    builder.add_depend("luci-compat")
 
     # ── Collect all package files ────────────────────────────────────────
 
@@ -796,61 +798,24 @@ def build_luci_apk(source_dir: Path = None, output_dir: Path = None):
         for f in sorted(static_src.rglob("*")):
             if f.is_file():
                 rel = f.relative_to(static_src)
-                add_source_file(f, f"www/luci-static/mitmproxy/{rel}")
+                # Served as <%=resource%>/mitmproxy/<file> in the templates
+                add_source_file(f, f"www/luci-static/resources/mitmproxy/{rel}")
 
-    # UCI defaults script
-    uci_defaults_content = """\
-#!/bin/sh
-# Ensure mitmproxy UCI config exists
-[ -f /etc/config/mitmproxy ] || {
-cat > /etc/config/mitmproxy <<'CONF'
-config mitmproxy 'main'
-\toption enabled '0'
-\toption listen_host '0.0.0.0'
-\toption listen_port '8080'
-\toption mode 'regular'
-\toption ssl_insecure '0'
-\toption confdir '/etc/mitmproxy/certs'
-\toption web_host '0.0.0.0'
-\toption web_port '8081'
-
-config mitmproxy 'logging'
-\toption log_level 'info'
-\toption flow_detail '1'
-
-config mitmproxy 'interception'
-\toption intercept ''
-\toption anticache '0'
-\toption anticomp '0'
-
-config mitmproxy 'traffic_analysis'
-\toption enabled '0'
-\toption flow_collection '1'
-\toption behavior_analysis '0'
-\toption ai_analysis '0'
-\toption max_flows '10000'
-CONF
-}
-
-# Clear LuCI cache so the new app appears
-rm -rf /tmp/luci-modulecache /tmp/luci-indexcache 2>/dev/null
+    # ── Maintainer scripts ───────────────────────────────────────────────
+    # The mitmproxy package owns /etc/config/mitmproxy. If LuCI is installed
+    # first, create an empty config with the sections the CBI pages edit;
+    # the init script supplies defaults for every unset option.
+    post_install_script = r"""#!/bin/sh
+[ -f /etc/config/mitmproxy ] || touch /etc/config/mitmproxy
+for section in main interception logging; do
+	uci -q get "mitmproxy.$section" >/dev/null || uci -q set "mitmproxy.$section=mitmproxy"
+done
+uci -q commit mitmproxy
+rm -rf /tmp/luci-modulecache /tmp/luci-indexcache* 2>/dev/null
 exit 0
 """
-    builder.add_file("etc/uci-defaults/99-luci-mitmproxy",
-                     uci_defaults_content.encode('utf-8'),
-                     mode=0o755, mtime=build_time)
-
-    # ── Post-install script ──────────────────────────────────────────────
-
-    post_install_script = """\
-#!/bin/sh
-# Run UCI defaults
-[ -x /etc/uci-defaults/99-luci-mitmproxy ] && /etc/uci-defaults/99-luci-mitmproxy
-# Clear LuCI cache
-rm -rf /tmp/luci-modulecache /tmp/luci-indexcache 2>/dev/null
-echo "luci-app-mitmproxy installed successfully"
-"""
     builder.set_script("post-install", post_install_script)
+    builder.set_script("post-upgrade", post_install_script)
 
     # ── Build the APK v3 package ─────────────────────────────────────────
 
@@ -862,10 +827,10 @@ echo "luci-app-mitmproxy installed successfully"
 
     size_kb = len(apk_data) / 1024
     print(f"Built: {apk_path} ({size_kb:.1f} KB)")
-    print(f"\nInstall on OpenWrt:")
+    print("\nInstall on OpenWrt:")
     print(f"  scp {apk_name} root@<router-ip>:/tmp/")
-    print(f"  ssh root@<router-ip> 'apk add --allow-untrusted /tmp/{apk_name}'")
-    print(f"  # Then visit http://<router-ip>/cgi-bin/luci/admin/services/mitmproxy")
+    print("  ssh root@<router-ip> 'apk add --allow-untrusted /tmp/{apk_name}'")
+    print("  # Then visit http://<router-ip>/cgi-bin/luci/admin/services/mitmproxy")
     return apk_path
 
 
